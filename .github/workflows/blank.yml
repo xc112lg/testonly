@@ -1,0 +1,31 @@
+name: Auto Update Fork
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # Run every day at midnight
+  workflow_dispatch:
+jobs:
+  update-fork:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Set up Git
+      run: |
+        git config --global user.name "Your Name"
+        git config --global user.email "your.email@example.com"
+
+    - name: Fetch upstream changes
+      run: |
+        git remote add upstream https://github.com/jayz1212/testonly.git
+        git fetch upstream
+
+    - name: Iterate over branches and update
+      run: |
+        for branch in $(git branch -a | grep remotes/origin | grep -v HEAD | awk '{gsub(/remotes\/origin\//,"");print}'); do
+          git checkout $branch
+          git merge --allow-unrelated-histories upstream/$branch
+          git push origin $branch
+        done
