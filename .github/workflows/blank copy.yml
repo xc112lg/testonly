@@ -26,12 +26,10 @@ jobs:
         git config --global user.name "Your Name"
         git config --global user.email "your.email@example.com"
 
-    - name: Get GitHub context
-      id: github-context
+    - name: Get GitHub Email
+      id: github-email
       run: |
-        USERNAME=$(echo "${{ github.actor }}" | tr -d '"')
-        EMAIL=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/user/emails | jq -r '.[0].email')
-        echo "GitHub Username: $USERNAME"
+        EMAIL=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/user | grep -oP '"email": "\K[^"]+')
         echo "GitHub Email: $EMAIL"
       shell: bash
 
@@ -45,10 +43,4 @@ jobs:
         for branch in $(git branch -a | grep remotes/origin | grep -v HEAD | awk '{gsub(/remotes\/origin\//,"");print}'); do
           git checkout $branch
           git merge --allow-unrelated-histories upstream/$branch
-          git push origin $branch
-        done
-
-    - name: Use GitHub Context Values
-      run: |
-        echo "Using GitHub username: ${{ steps.github-context.outputs.USERNAME }}"
-        echo "Using GitHub email: ${{ steps.github-context.outputs.EMAIL }}"
+          git push ori
