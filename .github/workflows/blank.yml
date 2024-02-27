@@ -1,9 +1,13 @@
-name: Auto Update Fork
+name: Auto Update Forksss
 
 on:
+  push:
+    branches:
+      - main  # Replace with the branch you want to trigger the workflow on
   schedule:
     - cron: '0 */1 * * *'  # Run every hour
   workflow_dispatch:
+
 jobs:
   update-fork:
     runs-on: ubuntu-latest
@@ -22,6 +26,15 @@ jobs:
         git config --global user.name "Your Name"
         git config --global user.email "your.email@example.com"
 
+    - name: Get GitHub context
+      id: github-context
+      run: |
+        USERNAME=$(echo "${{ github.actor }}" | tr -d '"')
+        EMAIL=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/user/emails | jq -r '.[0].email')
+        echo "GitHub Username: $USERNAME"
+        echo "GitHub Email: $EMAIL"
+      shell: bash
+
     - name: Fetch upstream changes
       run: |
         git remote add upstream https://github.com/jayz1212/testonly.git
@@ -34,3 +47,8 @@ jobs:
           git merge --allow-unrelated-histories upstream/$branch
           git push origin $branch
         done
+
+    - name: Use GitHub Context Values
+      run: |
+        echo "Using GitHub username: ${{ steps.github-context.outputs.USERNAME }}"
+        echo "Using GitHub email: ${{ steps.github-context.outputs.EMAIL }}"
