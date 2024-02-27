@@ -21,38 +21,22 @@ jobs:
           git config --global user.name "${{ github.actor }}"
           git config --global user.email "${{ github.actor }}@users.noreply.github.com"
 
-    steps:
-    - name: Set up Node.js
-      uses: actions/setup-node@v3
-      with:
-        node-version: '20'  # Update to the latest Node.js version available
 
-    - name: Checkout code
-      uses: actions/checkout@v2
 
-    - name: Get Git Config
-      id: git-config
-      run: |
-        USERNAME=$(git config user.name)
-        EMAIL=$(git config user.email)
-        echo "GitHub Username: $USERNAME"
-        echo "GitHub Email: $EMAIL"
-      shell: bash
+      - name: Fetch upstream changes
+        run: |
+          git remote add upstream https://github.com/jayz1212/testonly.git
+          git fetch upstream
 
-    - name: Fetch upstream changes
-      run: |
-        git remote add upstream https://github.com/jayz1212/testonly.git
-        git fetch upstream
+      - name: Iterate over branches and update
+        run: |
+          for branch in $(git branch -a | grep remotes/origin | grep -v HEAD | awk '{gsub(/remotes\/origin\//,"");print}'); do
+            git checkout $branch
+            git merge --allow-unrelated-histories upstream/$branch
+            git push origin $branch
+          done
 
-    - name: Iterate over branches and update
-      run: |
-        for branch in $(git branch -a | grep remotes/origin | grep -v HEAD | awk '{gsub(/remotes\/origin\//,"");print}'); do
-          git checkout $branch
-          git merge --allow-unrelated-histories upstream/$branch
-          git push origin $branch
-        done
-
-    - name: Use Git Config Values
-      run: |
-        echo "Using GitHub username: ${{ steps.git-config.outputs.USERNAME }}"
-        echo "Using GitHub email: ${{ steps.git-config.outputs.EMAIL }}"
+      - name: Use Git Config Values
+        run: |
+          echo "Using GitHub username: ${{ steps.git-config.outputs.USERNAME }}"
+          echo "Using GitHub email: ${{ steps.git-config.outputs.EMAIL }}"
