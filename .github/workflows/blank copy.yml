@@ -1,4 +1,4 @@
-name: Auto Update Fork
+name: Auto Update Forksss
 
 on:
   push:
@@ -30,7 +30,7 @@ jobs:
       id: github-context
       run: |
         USERNAME=$(echo "${{ github.actor }}" | tr -d '"')
-        EMAIL=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/users/${USERNAME}/emails | jq -r '.[0].email')
+        EMAIL=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/user/emails | jq -r '.[0].email')
         echo "GitHub Username: $USERNAME"
         echo "GitHub Email: $EMAIL"
       shell: bash
