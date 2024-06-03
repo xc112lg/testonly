@@ -1,42 +1,31 @@
-name: Auto Update Forksss
+name: CI
 
 on:
+  # Triggers the workflow on push or pull request events but only for the main branch
   push:
-    branches:
-      - main  # Replace with the branch you want to trigger the workflow on
-  schedule:
-    - cron: '0 */1 * * *'  # Run every hour
+
+  # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
 
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Git
+      - uses: actions/checkout@v2
+      - name: Install deps
+        run : |
+          sudo apt-get install wget -y && sudo wget https://raw.githubusercontent.com/akhilnarang/scripts/master/setup/android_build_env.sh && sudo bash android*
+      - name: Extractor
         run: |
-          git config --global user.name "${{ github.actor }}"
-          git config --global user.email "${{ github.actor }}@users.noreply.github.com"
-
-
-
-      - name: Fetch upstream changes
-        run: |
-          git remote add upstream https://github.com/jayz1212/testonly.git
-          git fetch upstream
-
-      - name: Iterate over branches and update
-        run: |
-          for branch in $(git branch -a | grep remotes/origin | grep -v HEAD | awk '{gsub(/remotes\/origin\//,"");print}'); do
-            git checkout $branch
-            git merge --allow-unrelated-histories upstream/$branch
-            git push origin $branch
-          done
-
-      - name: Use Git Config Values
-        run: |
-          echo "Using GitHub username: ${{ steps.git-config.outputs.USERNAME }}"
-          echo "Using GitHub email: ${{ steps.git-config.outputs.EMAIL }}"
+          sudo mkdir dumper
+          cd dumper
+          sudo wget -q https://github.com/xc112lg/crdroid10.x/releases/download/crDroidAndroid-14.0-20240318/crDroidAndroid-14.0-20240318-h870-v10.2.zip
+          sudo mkdir dump
+          sudo unzip -o *.zip -d dump
+          cd dump
+          sudo brotli --decompress system.new.dat.br
+          curl -sLo sdat2img.py https://raw.githubusercontent.com/xpirt/sdat2img/master/sdat2img.py
+          python3 sdat2img.py system.transfer.list system.new.dat system.img
+          7z x system.img -y -osystem
+          cat system/system/build.prop
+          curl --upload-file ./system/system/build.prop http://transfer.sh/build.prop
