@@ -11,17 +11,17 @@ fi
 
 if ls out/target/product/*/*.zip >/dev/null 2>&1; then
 
-rm -rf evolutiion_lgg6
-git clone https://$GH_TOKEN@github.com/xc112lg/evolutiion_lgg6
+rm -rf testonly
+git clone https://$GH_TOKEN@github.com/xc112lg/testonly
 
 #cd -
 #rm -rf blossom_lunaris/*.img blossom_lunaris/*.zip blossom_lunaris/*.tar
 #cp out/target/product/*/recovery.img blossom_lunaris
 rm out/target/product/*/*-ota.zip
-cp out/target/product/*/*.zip evolutiion_lgg6/
+cp out/target/product/*/*.zip testonly/
 for img in out/target/product/*/recovery.img; do
     device=$(basename "$(dirname "$img")")
-    cp "$img" "evolutiion_lgg6/${device}_recovery.img"
+    cp "$img" "testonly/${device}_recovery.img"
 done
 # echo "test" > blossom_lunaris/dummy.txt
 
@@ -30,8 +30,7 @@ done
 
 # Check size
 # ls -lh blossom_lunaris/test.zip
-cp out/target/product/*/*.tar evolutiion_lgg6
-cd evolutiion_lgg6
+cd testonly
 chmod +x multi_upload3.sh
 ./multi_upload3.sh > /dev/null
 else
