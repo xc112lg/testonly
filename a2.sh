@@ -115,6 +115,17 @@ setup() {
   "$PIP" install -q -r requirements.txt 2>&1 | tee -a "$LOG_FILE"
   [ "${PIPESTATUS[0]}" -eq 0 ] || error "Failed to install payload_dumper requirements"
   
+  # sdat2img (for block-based OTA ROMs shipped as *.new.dat.br + *.transfer.list,
+  # common in MIUI recovery-flashable zips for older non-A/B devices)
+  if [ ! -d "$WORK_DIR/tools/sdat2img" ]; then
+    log "Installing sdat2img..."
+    git clone -q https://github.com/xpirt/sdat2img.git "$WORK_DIR/tools/sdat2img" \
+      || error "Failed to clone sdat2img repo"
+    [ -f "$WORK_DIR/tools/sdat2img/sdat2img.py" ] || error "sdat2img.py missing after clone"
+  fi
+
+  command -v brotli &> /dev/null || error "brotli CLI not found — needed to decompress *.new.dat.br files"
+
   # AIK
   if [ ! -d "$HOME/tools/AIK" ]; then
     log "Installing AIK (Android Image Kitchen)..."
@@ -260,14 +271,52 @@ extract() {
     log "✓ Target already extracted — skipping unzip + payload_dumper"
   else
     log "Extracting MIUI 12.5..."
-    if [ ! -f payload.bin ]; then
+    if [ ! -f payload.bin ] && [ ! -d images ]; then
       unzip -q miui_dandelion.zip || error "Failed to unzip target ROM"
     fi
-    [ -f payload.bin ] || error "payload.bin not found after unzipping target ROM — check ROM package format"
 
-    "$PYTHON" "$WORK_DIR/tools/payload_dumper/payload_dumper.py" payload.bin --out extracted/partitions/ 2>&1 | tee -a "$LOG_FILE"
-    [ "${PIPESTATUS[0]}" -eq 0 ] || error "payload_dumper failed on target payload.bin — check $LOG_FILE"
-    [ -f extracted/partitions/vendor.img ] || error "vendor.img missing from target partitions/ after dump — extraction incomplete"
+    mkdir -p extracted/partitions
+
+    if [ -f payload.bin ]; then
+      # A/B (seamless-update) ROM: partitions are packed inside payload.bin
+      log "Target ROM format: payload.bin (A/B)"
+      "$PYTHON" "$WORK_DIR/tools/payload_dumper/payload_dumper.py" payload.bin --out extracted/partitions/ 2>&1 | tee -a "$LOG_FILE"
+      [ "${PIPESTATUS[0]}" -eq 0 ] || error "payload_dumper failed on target payload.bin — check $LOG_FILE"
+    elif [ -d images ] && ls images/*.img &> /dev/null; then
+      # Legacy fastboot ROM: partitions ship as separate raw .img files under images/
+      # (common for older non-A/B devices like dandelion, which has no seamless updates)
+      log "Target ROM format: fastboot images/ (non-A/B)"
+      cp images/*.img extracted/partitions/ || error "Failed to copy target images/*.img"
+    elif ls *.transfer.list &> /dev/null; then
+      # Block-based OTA (recovery-flashable) ROM: each partition ships as
+      # <part>.new.dat[.br] + <part>.transfer.list (+ empty <part>.patch.dat
+      # for incremental-only updates, which is irrelevant for a full ROM).
+      # Needs brotli decompression then sdat2img to produce a raw .img.
+      log "Target ROM format: block-based OTA (transfer.list/sdat)"
+      for tl in *.transfer.list; do
+        part="${tl%.transfer.list}"
+        datbr="${part}.new.dat.br"
+        dat="${part}.new.dat"
+
+        if [ -f "$datbr" ]; then
+          log "Decompressing ${datbr}..."
+          brotli -d -f "$datbr" -o "$dat" 2>&1 | tee -a "$LOG_FILE"
+          [ "${PIPESTATUS[0]}" -eq 0 ] || error "brotli decompression failed for $datbr"
+        fi
+
+        if [ -f "$dat" ]; then
+          log "Converting $part via sdat2img..."
+          "$PYTHON" "$WORK_DIR/tools/sdat2img/sdat2img.py" "$tl" "$dat" "extracted/partitions/${part}.img" 2>&1 | tee -a "$LOG_FILE"
+          [ "${PIPESTATUS[0]}" -eq 0 ] || error "sdat2img failed for $part"
+        else
+          log "⚠ No new.dat payload for $part (likely 0 changed blocks) — skipping"
+        fi
+      done
+    else
+      error "No payload.bin, images/*.img, or *.transfer.list found after unzipping target ROM — unrecognized ROM package format. Run 'unzip -l miui_dandelion.zip' to inspect its contents."
+    fi
+
+    [ -f extracted/partitions/vendor.img ] || error "vendor.img missing from target partitions/ after extraction — extraction incomplete"
 
     cd extracted/partitions/
     for part in product system_ext vendor; do
