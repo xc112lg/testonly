@@ -244,7 +244,7 @@ extract() {
   else
     log "Extracting HyperOS 2..."
     if [ ! -f payload.bin ]; then
-      unzip -q hyperos2_pearl.zip || error "Failed to unzip donor ROM"
+      unzip -o -q hyperos2_pearl.zip || error "Failed to unzip donor ROM"
     fi
     [ -f payload.bin ] || error "payload.bin not found after unzipping donor ROM — check ROM package format"
 
@@ -271,8 +271,8 @@ extract() {
     log "✓ Target already extracted — skipping unzip + payload_dumper"
   else
     log "Extracting MIUI 12.5..."
-    if [ ! -f payload.bin ] && [ ! -d images ]; then
-      unzip -q miui_dandelion.zip || error "Failed to unzip target ROM"
+    if [ ! -f payload.bin ] && [ ! -d images ] && ! ls *.transfer.list &> /dev/null; then
+      unzip -o -q miui_dandelion.zip || error "Failed to unzip target ROM"
     fi
 
     mkdir -p extracted/partitions
@@ -317,6 +317,16 @@ extract() {
     fi
 
     [ -f extracted/partitions/vendor.img ] || error "vendor.img missing from target partitions/ after extraction — extraction incomplete"
+
+    # Also grab target's own boot.img (+ vbmeta/dtbo, kept for reference).
+    # These ship as plain loose files in this ROM's zip, no conversion needed.
+    # Using the TARGET's boot.img rather than the donor's is the safer choice
+    # here: boot.img is tightly coupled to the SoC's kernel/DTB/boot chain,
+    # and donor and target are different chipset families.
+    for f in boot.img dtbo.img vbmeta.img vbmeta_system.img vbmeta_vendor.img; do
+      [ -f "$f" ] && cp "$f" "extracted/partitions/$f"
+    done
+    [ -f extracted/partitions/boot.img ] || error "Target boot.img not found in ROM zip — check ROM package contents"
 
     cd extracted/partitions/
     for part in product system_ext vendor; do
@@ -464,10 +474,10 @@ patch_boot() {
   
   cd "$WORK_DIR/boot_patch"
   
-  [ -f "$WORK_DIR/donor/extracted/partitions/boot.img" ] || error "Donor boot.img not found — did extract() run successfully?"
+  [ -f "$WORK_DIR/target/extracted/partitions/boot.img" ] || error "Target boot.img not found — did extract() run successfully?"
 
   log "Unpacking boot image..."
-  ~/tools/AIK/unpackimg.sh "$WORK_DIR/donor/extracted/partitions/boot.img" 2>&1 | tee -a "$LOG_FILE"
+  ~/tools/AIK/unpackimg.sh "$WORK_DIR/target/extracted/partitions/boot.img" 2>&1 | tee -a "$LOG_FILE"
   [ "${PIPESTATUS[0]}" -eq 0 ] || error "AIK unpackimg.sh failed on boot.img"
   [ -f split_img/ramdisk.cpio.gz ] || error "ramdisk.cpio.gz missing after unpack — boot.img may be a different format (e.g. no separate ramdisk, or vendor_boot split)"
 
