@@ -4,6 +4,8 @@
 # Run this once, wait, done!
 
 set -e
+set -o pipefail  # belt-and-suspenders: also fail on the first bad command in any pipeline,
+                  # in addition to the explicit PIPESTATUS checks added throughout this script
 
 # ============================================================
 # CONFIGURATION
@@ -59,11 +61,24 @@ setup() {
   # Install tools
   log "Installing required tools..."
   sudo apt update -qq 2>&1 | tail -1
+
+  # NOTE: 'simg2img' is not a real package name on current Ubuntu/Debian repos
+  # (it used to ship in 'android-tools-fsutils' on some releases, but nothing
+  # later in this script actually calls simg2img — payload_dumper, mkfs.ext4,
+  # and loop-mounting are used instead — so it's dropped rather than guessed at).
   sudo apt install -y -qq python3 python3-pip openjdk-11-jdk \
     android-tools-adb android-tools-fastboot \
-    p7zip-full xz-utils brotli simg2img e2fsprogs erofs-utils git 2>&1 | tail -1
-  
-  pip3 install --user -q protobuf==3.20.1 brotli pycryptodome 2>&1 | tail -1
+    p7zip-full xz-utils brotli e2fsprogs erofs-utils git 2>&1 | tee -a "$LOG_FILE"
+  if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+    error "apt install failed — check $LOG_FILE for the missing/broken package"
+  fi
+
+  command -v pip3 &> /dev/null || error "pip3 not found after apt install — check log"
+
+  pip3 install --user -q protobuf==3.20.1 brotli pycryptodome 2>&1 | tee -a "$LOG_FILE"
+  if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+    error "pip3 install failed — check $LOG_FILE"
+  fi
   
   # payload_dumper
   if [ ! -d "$WORK_DIR/tools/payload_dumper" ]; then
@@ -78,11 +93,26 @@ setup() {
     log "Installing AIK (Android Image Kitchen)..."
     mkdir -p "$HOME/tools"
     cd "$HOME/tools"
-    wget -q https://github.com/osm0sis/Android-Image-Kitchen/archive/refs/heads/master.zip -O AIK.zip
-    unzip -q AIK.zip
-    mv Android-Image-Kitchen-master AIK
+
+    wget -q https://github.com/osm0sis/Android-Image-Kitchen/archive/refs/heads/master.zip -O AIK.zip \
+      || error "AIK download failed — check network/URL"
+
+    [ -s AIK.zip ] || error "AIK.zip is empty or missing — download did not succeed"
+
+    unzip -q AIK.zip || error "AIK.zip failed to unzip (possibly an HTML error page, not a real zip)"
+
+    # Don't assume the exact folder name — GitHub archive naming can change
+    AIK_EXTRACTED_DIR=$(find . -maxdepth 1 -type d -iname "Android-Image-Kitchen-*" | head -n1)
+    [ -n "$AIK_EXTRACTED_DIR" ] || error "Could not find extracted Android-Image-Kitchen-* directory"
+
+    mv "$AIK_EXTRACTED_DIR" AIK
+    rm -f AIK.zip
+
+    [ -f AIK/unpackimg.sh ] || error "AIK/unpackimg.sh missing after extraction — repo layout may have changed"
+    [ -f AIK/repackimg.sh ] || error "AIK/repackimg.sh missing after extraction — repo layout may have changed"
+
     chmod +x AIK/unpackimg.sh AIK/repackimg.sh
-    rm AIK.zip
+    log "✓ AIK installed"
   fi
   
   log "✓ Setup complete"
@@ -95,26 +125,46 @@ setup() {
 download() {
   log_section "STEP 2: Downloading ROMs (~4.7 GB total)"
   
-  # Try aria2c if available, otherwise wget
+  # Try aria2c if available, otherwise wget.
+  # NOTE: aria2c and wget take different flags for the output filename
+  # ('-o file' + '--allow-overwrite' for aria2c vs '-O file' for wget, which
+  # has no equivalent overwrite flag since -O always overwrites). Using the
+  # aria2c-style flags with wget would fail immediately, so branch per-tool
+  # at call sites instead of sharing one flag string.
   if command -v aria2c &> /dev/null; then
-    DOWNLOAD_CMD="aria2c -x 16 -k 1M -s 16"
+    USE_ARIA2=1
+    log "Download tool: aria2c"
   else
-    DOWNLOAD_CMD="wget"
+    USE_ARIA2=0
+    log "Download tool: wget"
   fi
-  
-  log "Download tool: $DOWNLOAD_CMD"
+
+  do_download() {
+    local url="$1"
+    local outfile="$2"
+    if [ "$USE_ARIA2" -eq 1 ]; then
+      aria2c -x 16 -k 1M -s 16 --allow-overwrite=true -o "$outfile" "$url" 2>&1 | tee -a "$LOG_FILE"
+    else
+      wget -q --show-progress -O "$outfile" "$url" 2>&1 | tee -a "$LOG_FILE"
+    fi
+    return "${PIPESTATUS[0]}"
+  }
   
   # Donor
   log "Downloading HyperOS 2 (Redmi Note 12T Pro)..."
   cd "$WORK_DIR/donor"
-  $DOWNLOAD_CMD --allow-overwrite=true -o hyperos2_pearl.zip "$DONOR_URL" 2>&1 | tail -5
+  do_download "$DONOR_URL" "hyperos2_pearl.zip" || error "Donor ROM download failed"
+  [ -s hyperos2_pearl.zip ] || error "Donor ROM file is empty/missing after download"
+  unzip -t hyperos2_pearl.zip &> /dev/null || error "Downloaded donor file is not a valid zip (bad URL / interrupted download / expired link)"
   DONOR_SIZE=$(du -sh hyperos2_pearl.zip | cut -f1)
   log "✓ Donor: $DONOR_SIZE"
   
   # Target
   log "Downloading MIUI 12.5 (Redmi 10a)..."
   cd "$WORK_DIR/target"
-  $DOWNLOAD_CMD --allow-overwrite=true -o miui_dandelion.zip "$TARGET_URL" 2>&1 | tail -5
+  do_download "$TARGET_URL" "miui_dandelion.zip" || error "Target ROM download failed"
+  [ -s miui_dandelion.zip ] || error "Target ROM file is empty/missing after download"
+  unzip -t miui_dandelion.zip &> /dev/null || error "Downloaded target file is not a valid zip (bad URL / interrupted download / expired link)"
   TARGET_SIZE=$(du -sh miui_dandelion.zip | cut -f1)
   log "✓ Target: $TARGET_SIZE"
   
@@ -131,8 +181,12 @@ extract() {
   # Donor
   log "Extracting HyperOS 2..."
   cd "$WORK_DIR/donor"
-  unzip -q hyperos2_pearl.zip 2>&1 || true
-  python3 "$WORK_DIR/tools/payload_dumper/payload_dumper.py" payload.bin -o partitions/ 2>&1 | tail -3
+  unzip -q hyperos2_pearl.zip || error "Failed to unzip donor ROM"
+  [ -f payload.bin ] || error "payload.bin not found after unzipping donor ROM — check ROM package format"
+
+  python3 "$WORK_DIR/tools/payload_dumper/payload_dumper.py" payload.bin -o partitions/ 2>&1 | tee -a "$LOG_FILE"
+  [ "${PIPESTATUS[0]}" -eq 0 ] || error "payload_dumper failed on donor payload.bin — check $LOG_FILE"
+  [ -f partitions/boot.img ] || error "boot.img missing from donor partitions/ after dump — extraction incomplete"
   
   cd partitions/
   for part in mi_ext product system system_ext vendor; do
@@ -148,8 +202,12 @@ extract() {
   # Target
   log "Extracting MIUI 12.5..."
   cd "$WORK_DIR/target"
-  unzip -q miui_dandelion.zip 2>&1 || true
-  python3 "$WORK_DIR/tools/payload_dumper/payload_dumper.py" payload.bin -o partitions/ 2>&1 | tail -3
+  unzip -q miui_dandelion.zip || error "Failed to unzip target ROM"
+  [ -f payload.bin ] || error "payload.bin not found after unzipping target ROM — check ROM package format"
+
+  python3 "$WORK_DIR/tools/payload_dumper/payload_dumper.py" payload.bin -o partitions/ 2>&1 | tee -a "$LOG_FILE"
+  [ "${PIPESTATUS[0]}" -eq 0 ] || error "payload_dumper failed on target payload.bin — check $LOG_FILE"
+  [ -f partitions/vendor.img ] || error "vendor.img missing from target partitions/ after dump — extraction incomplete"
   
   cd partitions/
   for part in product system_ext vendor; do
@@ -251,17 +309,20 @@ repack() {
   mkdir -p "$WORK_DIR/final_images"
   
   log "Creating product.img..."
-  mkfs.ext4 -L product -T default -d "$WORK_DIR/output/product" -b 4096 -c "$WORK_DIR/final_images/product.img" 2>&1 | tail -2
+  mkfs.ext4 -L product -T default -d "$WORK_DIR/output/product" -b 4096 -c "$WORK_DIR/final_images/product.img" 2>&1 | tee -a "$LOG_FILE"
+  [ "${PIPESTATUS[0]}" -eq 0 ] || error "mkfs.ext4 failed building product.img"
   PROD_SIZE=$(du -sh "$WORK_DIR/final_images/product.img" | cut -f1)
   log "✓ product.img ($PROD_SIZE)"
   
   log "Creating system_ext.img..."
-  mkfs.ext4 -L system_ext -T default -d "$WORK_DIR/output/system_ext" -b 4096 -c "$WORK_DIR/final_images/system_ext.img" 2>&1 | tail -2
+  mkfs.ext4 -L system_ext -T default -d "$WORK_DIR/output/system_ext" -b 4096 -c "$WORK_DIR/final_images/system_ext.img" 2>&1 | tee -a "$LOG_FILE"
+  [ "${PIPESTATUS[0]}" -eq 0 ] || error "mkfs.ext4 failed building system_ext.img"
   SEXT_SIZE=$(du -sh "$WORK_DIR/final_images/system_ext.img" | cut -f1)
   log "✓ system_ext.img ($SEXT_SIZE)"
   
   log "Creating vendor.img..."
-  mkfs.ext4 -L vendor -T default -d "$WORK_DIR/output/vendor" -b 4096 -c "$WORK_DIR/final_images/vendor.img" 2>&1 | tail -2
+  mkfs.ext4 -L vendor -T default -d "$WORK_DIR/output/vendor" -b 4096 -c "$WORK_DIR/final_images/vendor.img" 2>&1 | tee -a "$LOG_FILE"
+  [ "${PIPESTATUS[0]}" -eq 0 ] || error "mkfs.ext4 failed building vendor.img"
   VEND_SIZE=$(du -sh "$WORK_DIR/final_images/vendor.img" | cut -f1)
   log "✓ vendor.img ($VEND_SIZE)"
 }
@@ -275,13 +336,18 @@ patch_boot() {
   
   cd "$WORK_DIR/boot_patch"
   
+  [ -f "$WORK_DIR/donor/extracted/partitions/boot.img" ] || error "Donor boot.img not found — did extract() run successfully?"
+
   log "Unpacking boot image..."
-  ~/tools/AIK/unpackimg.sh "$WORK_DIR/donor/extracted/partitions/boot.img" 2>&1 | tail -2
-  
+  ~/tools/AIK/unpackimg.sh "$WORK_DIR/donor/extracted/partitions/boot.img" 2>&1 | tee -a "$LOG_FILE"
+  [ "${PIPESTATUS[0]}" -eq 0 ] || error "AIK unpackimg.sh failed on boot.img"
+  [ -f split_img/ramdisk.cpio.gz ] || error "ramdisk.cpio.gz missing after unpack — boot.img may be a different format (e.g. no separate ramdisk, or vendor_boot split)"
+
   log "Extracting ramdisk..."
   cd split_img
-  cpio -idm < ramdisk.cpio.gz 2>/dev/null
-  
+  cpio -idm < ramdisk.cpio.gz || error "Failed to extract ramdisk.cpio.gz — corrupt or unexpected compression"
+  [ -f init.rc ] || error "init.rc not found in extracted ramdisk — cannot patch"
+
   log "Patching ramdisk (disable AVB, permissive SELinux)..."
   sed -i 's/verity_user_mode=enforcing/verity_user_mode=disabled/g' init.rc
   sed -i 's/ro.boot.veritymode=enforcing/ro.boot.veritymode=disabled/g' init.rc
@@ -294,7 +360,9 @@ patch_boot() {
   rm -f split_img/ramdisk.cpio.gz
   
   log "Rebuilding boot.img..."
-  ./repackimg.sh 2>&1 | tail -2
+  ./repackimg.sh 2>&1 | tee -a "$LOG_FILE"
+  [ "${PIPESTATUS[0]}" -eq 0 ] || error "AIK repackimg.sh failed"
+  [ -f image-new.img ] || error "repackimg.sh did not produce image-new.img"
   
   cp image-new.img "$WORK_DIR/final_images/boot.img"
   BOOT_SIZE=$(du -sh "$WORK_DIR/final_images/boot.img" | cut -f1)
