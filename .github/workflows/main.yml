@@ -1,0 +1,46 @@
+name: Port ROM (HyperOS2 -> Redmi 10a)
+
+on:
+  workflow_dispatch:   # manual "Run workflow" button in the Actions tab
+  # push:
+  #   paths:
+  #     - 'aa.sh'       # uncomment to also trigger on changes to the script
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360   # script downloads ~4.7GB and builds images; give it room
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Clean-up
+        uses: rokibhasansagar/slimhub_actions@main
+
+      - name: Swap Space
+        uses: pierotofy/set-swap-space@master
+        with:
+          swap-size-gb: 12
+
+      - name: Make script executable
+        run: chmod +x aa.sh
+
+      - name: Run port script
+        run: ./aa.sh
+
+      - name: Upload final images
+        if: always()   # grab whatever was produced even if a later step failed
+        uses: actions/upload-artifact@v4
+        with:
+          name: final_images
+          path: ~/hyperos2_rn12t_to_10a/final_images/*.img
+          if-no-files-found: warn
+
+      - name: Upload log file
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: ~/hyperos2_rn12t_to_10a/PORT_*.log
+          if-no-files-found: warn
