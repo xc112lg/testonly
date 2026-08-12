@@ -15,6 +15,11 @@ WORK_DIR="$HOME/hyperos2_rn12t_to_10a"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 LOG_FILE="$WORK_DIR/PORT_$TIMESTAMP.log"
 
+# Dedicated venv for payload_dumper's Python deps (set up in setup(), used in extract())
+PY_VENV="$WORK_DIR/tools/venv"
+PIP="$PY_VENV/bin/pip"
+PYTHON="$PY_VENV/bin/python"
+
 # ROM URLs (your provided links)
 DONOR_URL="https://cdnorg.d.miui.com/OS2.0.215.0.VLHCNXM/pearl-ota_full-OS2.0.215.0.VLHCNXM-user-15.0-8246bfc336.zip"
 TARGET_URL="https://cdnorg.d.miui.com/V12.5.16.0.RCZMIXM/miui_DANDELIONC3L2Global_V12.5.16.0.RCZMIXM_e004d17bcd_11.0.zip"
@@ -73,19 +78,36 @@ setup() {
     error "apt install failed — check $LOG_FILE for the missing/broken package"
   fi
 
-  command -v pip3 &> /dev/null || error "pip3 not found after apt install — check log"
+  # NOTE: modern Debian/Ubuntu ships PEP-668 "externally-managed-environment"
+  # Python, which blocks `pip3 install --user` outright. Rather than force it
+  # with --break-system-packages (which can fight apt-managed python3 packages),
+  # this script uses a dedicated venv for the payload_dumper toolchain.
+  command -v python3 &> /dev/null || error "python3 not found after apt install — check log"
 
-  pip3 install --user -q protobuf==3.20.1 brotli pycryptodome 2>&1 | tee -a "$LOG_FILE"
+  if [ ! -d "$PY_VENV" ]; then
+    log "Creating Python virtualenv for tooling..."
+    sudo apt install -y -qq python3-venv 2>&1 | tee -a "$LOG_FILE"
+    [ "${PIPESTATUS[0]}" -eq 0 ] || error "Failed to install python3-venv"
+    python3 -m venv "$PY_VENV" || error "Failed to create virtualenv at $PY_VENV"
+  fi
+
+  # From here on, use the venv's pip/python explicitly instead of relying on PATH
+  "$PIP" install -q --upgrade pip 2>&1 | tee -a "$LOG_FILE"
+  [ "${PIPESTATUS[0]}" -eq 0 ] || error "Failed to upgrade pip inside venv"
+
+  "$PIP" install -q protobuf==3.20.1 brotli pycryptodome 2>&1 | tee -a "$LOG_FILE"
   if [ "${PIPESTATUS[0]}" -ne 0 ]; then
-    error "pip3 install failed — check $LOG_FILE"
+    error "pip install failed inside venv — check $LOG_FILE"
   fi
   
   # payload_dumper
   if [ ! -d "$WORK_DIR/tools/payload_dumper" ]; then
     log "Installing payload_dumper..."
-    git clone -q https://github.com/vm03/payload_dumper.git "$WORK_DIR/tools/payload_dumper"
+    git clone -q https://github.com/vm03/payload_dumper.git "$WORK_DIR/tools/payload_dumper" \
+      || error "Failed to clone payload_dumper repo"
     cd "$WORK_DIR/tools/payload_dumper"
-    pip3 install --user -q -r requirements.txt
+    "$PIP" install -q -r requirements.txt 2>&1 | tee -a "$LOG_FILE"
+    [ "${PIPESTATUS[0]}" -eq 0 ] || error "Failed to install payload_dumper requirements"
   fi
   
   # AIK
@@ -177,6 +199,8 @@ download() {
 
 extract() {
   log_section "STEP 3: Extracting ROMs"
+
+  [ -x "$PYTHON" ] || error "Python venv not found at $PY_VENV — run setup() first"
   
   # Donor
   log "Extracting HyperOS 2..."
@@ -184,7 +208,7 @@ extract() {
   unzip -q hyperos2_pearl.zip || error "Failed to unzip donor ROM"
   [ -f payload.bin ] || error "payload.bin not found after unzipping donor ROM — check ROM package format"
 
-  python3 "$WORK_DIR/tools/payload_dumper/payload_dumper.py" payload.bin -o partitions/ 2>&1 | tee -a "$LOG_FILE"
+  "$PYTHON" "$WORK_DIR/tools/payload_dumper/payload_dumper.py" payload.bin -o partitions/ 2>&1 | tee -a "$LOG_FILE"
   [ "${PIPESTATUS[0]}" -eq 0 ] || error "payload_dumper failed on donor payload.bin — check $LOG_FILE"
   [ -f partitions/boot.img ] || error "boot.img missing from donor partitions/ after dump — extraction incomplete"
   
@@ -205,7 +229,7 @@ extract() {
   unzip -q miui_dandelion.zip || error "Failed to unzip target ROM"
   [ -f payload.bin ] || error "payload.bin not found after unzipping target ROM — check ROM package format"
 
-  python3 "$WORK_DIR/tools/payload_dumper/payload_dumper.py" payload.bin -o partitions/ 2>&1 | tee -a "$LOG_FILE"
+  "$PYTHON" "$WORK_DIR/tools/payload_dumper/payload_dumper.py" payload.bin -o partitions/ 2>&1 | tee -a "$LOG_FILE"
   [ "${PIPESTATUS[0]}" -eq 0 ] || error "payload_dumper failed on target payload.bin — check $LOG_FILE"
   [ -f partitions/vendor.img ] || error "vendor.img missing from target partitions/ after dump — extraction incomplete"
   
