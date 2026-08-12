@@ -116,7 +116,7 @@ setup() {
     mkdir -p "$HOME/tools"
     cd "$HOME/tools"
 
-    wget -q https://github.com/osm0sis/Android-Image-Kitchen/archive/refs/heads/AIK-Linux.zip -O AIK.zip \
+    wget -q https://github.com/osm0sis/Android-Image-Kitchen/archive/refs/heads/master.zip -O AIK.zip \
       || error "AIK download failed — check network/URL"
 
     [ -s AIK.zip ] || error "AIK.zip is empty or missing — download did not succeed"
