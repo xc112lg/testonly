@@ -237,7 +237,7 @@ extract() {
     fi
     [ -f payload.bin ] || error "payload.bin not found after unzipping donor ROM — check ROM package format"
 
-    "$PYTHON" "$WORK_DIR/tools/payload_dumper/payload_dumper.py" payload.bin -o extracted/partitions/ 2>&1 | tee -a "$LOG_FILE"
+    "$PYTHON" "$WORK_DIR/tools/payload_dumper/payload_dumper.py" payload.bin --out extracted/partitions/ 2>&1 | tee -a "$LOG_FILE"
     [ "${PIPESTATUS[0]}" -eq 0 ] || error "payload_dumper failed on donor payload.bin — check $LOG_FILE"
     [ -f extracted/partitions/boot.img ] || error "boot.img missing from donor partitions/ after dump — extraction incomplete"
 
@@ -265,7 +265,7 @@ extract() {
     fi
     [ -f payload.bin ] || error "payload.bin not found after unzipping target ROM — check ROM package format"
 
-    "$PYTHON" "$WORK_DIR/tools/payload_dumper/payload_dumper.py" payload.bin -o extracted/partitions/ 2>&1 | tee -a "$LOG_FILE"
+    "$PYTHON" "$WORK_DIR/tools/payload_dumper/payload_dumper.py" payload.bin --out extracted/partitions/ 2>&1 | tee -a "$LOG_FILE"
     [ "${PIPESTATUS[0]}" -eq 0 ] || error "payload_dumper failed on target payload.bin — check $LOG_FILE"
     [ -f extracted/partitions/vendor.img ] || error "vendor.img missing from target partitions/ after dump — extraction incomplete"
 
