@@ -11,7 +11,7 @@ set -o pipefail  # belt-and-suspenders: also fail on the first bad command in an
 # CONFIGURATION
 # ============================================================
 
-WORK_DIR="$HOME/hyperos2_rn12t_to_10a"
+WORK_DIR="/tmp/src/android"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 LOG_FILE="$WORK_DIR/PORT_$TIMESTAMP.log"
 
@@ -221,6 +221,44 @@ download() {
 # EXTRACT
 # ============================================================
 
+# Extract a partition image's contents into a directory WITHOUT relying on
+# loop-mounting (which needs root + kernel loop-device + matching filesystem
+# driver support, none of which are guaranteed in a container). Modern Xiaomi
+# product/system_ext/mi_ext partitions are commonly EROFS, not ext4 — tries
+# EROFS extraction first, falls back to ext4 debugfs, and only tries an
+# actual loop mount as a last resort.
+extract_partition_image() {
+  local img="$1"
+  local outdir="$2"
+  rm -rf "$outdir"
+  mkdir -p "$outdir"
+
+  # Try EROFS first (fsck.erofs --extract reads the image directly, no mount needed)
+  if command -v fsck.erofs &> /dev/null; then
+    if fsck.erofs --extract="$outdir" "$img" &>> "$LOG_FILE"; then
+      [ -n "$(ls -A "$outdir" 2>/dev/null)" ] && return 0
+    fi
+  fi
+
+  # Try ext4 via debugfs (reads the image directly, no mount needed)
+  if command -v debugfs &> /dev/null; then
+    debugfs -R "rdump / $outdir" "$img" &>> "$LOG_FILE"
+    [ -n "$(ls -A "$outdir" 2>/dev/null)" ] && return 0
+  fi
+
+  # Last resort: actual loop mount (needs root + matching kernel fs driver)
+  local mnt="${img%.img}_mount_tmp"
+  mkdir -p "$mnt"
+  if sudo mount -o ro,loop "$img" "$mnt" 2>>"$LOG_FILE"; then
+    cp -r "$mnt"/* "$outdir"/ 2>/dev/null
+    sudo umount "$mnt" 2>>"$LOG_FILE"
+    rmdir "$mnt" 2>/dev/null
+    [ -n "$(ls -A "$outdir" 2>/dev/null)" ] && return 0
+  fi
+
+  return 1
+}
+
 extract() {
   log_section "STEP 3: Extracting ROMs"
 
@@ -239,26 +277,28 @@ extract() {
   
   # Donor
   cd "$WORK_DIR/donor"
-  if [ -f extracted/partitions/boot.img ]; then
+  if [ -f extracted/partitions/boot.img ] && [ -f extracted/partitions/mi_ext/etc/build.prop ]; then
     log "✓ Donor already extracted — skipping unzip + payload_dumper"
   else
     log "Extracting HyperOS 2..."
-    if [ ! -f payload.bin ]; then
-      unzip -o -q hyperos2_pearl.zip || error "Failed to unzip donor ROM"
-    fi
-    [ -f payload.bin ] || error "payload.bin not found after unzipping donor ROM — check ROM package format"
+    if [ -f extracted/partitions/boot.img ]; then
+      log "✓ payload_dumper output already present — skipping re-dump, only re-extracting partition images"
+    else
+      if [ ! -f payload.bin ]; then
+        unzip -o -q hyperos2_pearl.zip || error "Failed to unzip donor ROM"
+      fi
+      [ -f payload.bin ] || error "payload.bin not found after unzipping donor ROM — check ROM package format"
 
-    "$PYTHON" "$WORK_DIR/tools/payload_dumper/payload_dumper.py" payload.bin --out extracted/partitions/ 2>&1 | tee -a "$LOG_FILE"
-    [ "${PIPESTATUS[0]}" -eq 0 ] || error "payload_dumper failed on donor payload.bin — check $LOG_FILE"
-    [ -f extracted/partitions/boot.img ] || error "boot.img missing from donor partitions/ after dump — extraction incomplete"
+      "$PYTHON" "$WORK_DIR/tools/payload_dumper/payload_dumper.py" payload.bin --out extracted/partitions/ 2>&1 | tee -a "$LOG_FILE"
+      [ "${PIPESTATUS[0]}" -eq 0 ] || error "payload_dumper failed on donor payload.bin — check $LOG_FILE"
+      [ -f extracted/partitions/boot.img ] || error "boot.img missing from donor partitions/ after dump — extraction incomplete"
+    fi
 
     cd extracted/partitions/
     for part in mi_ext product system system_ext vendor; do
       if [ -f "${part}.img" ]; then
-        mkdir -p ${part}_mount ${part}
-        sudo mount -o ro,loop ${part}.img ${part}_mount 2>/dev/null || true
-        cp -r ${part}_mount/* $part/ 2>/dev/null || true
-        sudo umount ${part}_mount 2>/dev/null || true
+        extract_partition_image "${part}.img" "${part}" \
+          || error "Failed to extract ${part}.img (donor) via EROFS, ext4, and loop-mount — image may be corrupt or an unsupported format"
       fi
     done
     cd "$WORK_DIR/donor"
@@ -267,56 +307,60 @@ extract() {
   
   # Target
   cd "$WORK_DIR/target"
-  if [ -f extracted/partitions/vendor.img ]; then
-    log "✓ Target already extracted — skipping unzip + payload_dumper"
+  if [ -f extracted/partitions/vendor.img ] && [ -n "$(ls -A extracted/partitions/vendor 2>/dev/null)" ]; then
+    log "✓ Target already extracted — skipping unzip + conversion"
   else
     log "Extracting MIUI 12.5..."
-    if [ ! -f payload.bin ] && [ ! -d images ] && ! ls *.transfer.list &> /dev/null; then
-      unzip -o -q miui_dandelion.zip || error "Failed to unzip target ROM"
-    fi
-
     mkdir -p extracted/partitions
 
-    if [ -f payload.bin ]; then
-      # A/B (seamless-update) ROM: partitions are packed inside payload.bin
-      log "Target ROM format: payload.bin (A/B)"
-      "$PYTHON" "$WORK_DIR/tools/payload_dumper/payload_dumper.py" payload.bin --out extracted/partitions/ 2>&1 | tee -a "$LOG_FILE"
-      [ "${PIPESTATUS[0]}" -eq 0 ] || error "payload_dumper failed on target payload.bin — check $LOG_FILE"
-    elif [ -d images ] && ls images/*.img &> /dev/null; then
-      # Legacy fastboot ROM: partitions ship as separate raw .img files under images/
-      # (common for older non-A/B devices like dandelion, which has no seamless updates)
-      log "Target ROM format: fastboot images/ (non-A/B)"
-      cp images/*.img extracted/partitions/ || error "Failed to copy target images/*.img"
-    elif ls *.transfer.list &> /dev/null; then
-      # Block-based OTA (recovery-flashable) ROM: each partition ships as
-      # <part>.new.dat[.br] + <part>.transfer.list (+ empty <part>.patch.dat
-      # for incremental-only updates, which is irrelevant for a full ROM).
-      # Needs brotli decompression then sdat2img to produce a raw .img.
-      log "Target ROM format: block-based OTA (transfer.list/sdat)"
-      for tl in *.transfer.list; do
-        part="${tl%.transfer.list}"
-        datbr="${part}.new.dat.br"
-        dat="${part}.new.dat"
-
-        if [ -f "$datbr" ]; then
-          log "Decompressing ${datbr}..."
-          brotli -d -f "$datbr" -o "$dat" 2>&1 | tee -a "$LOG_FILE"
-          [ "${PIPESTATUS[0]}" -eq 0 ] || error "brotli decompression failed for $datbr"
-        fi
-
-        if [ -f "$dat" ]; then
-          log "Converting $part via sdat2img..."
-          "$PYTHON" "$WORK_DIR/tools/sdat2img/sdat2img.py" "$tl" "$dat" "extracted/partitions/${part}.img" 2>&1 | tee -a "$LOG_FILE"
-          [ "${PIPESTATUS[0]}" -eq 0 ] || error "sdat2img failed for $part"
-        else
-          log "⚠ No new.dat payload for $part (likely 0 changed blocks) — skipping"
-        fi
-      done
+    if [ -f extracted/partitions/vendor.img ]; then
+      log "✓ Partition images already produced — skipping re-dump, only re-extracting partition contents"
     else
-      error "No payload.bin, images/*.img, or *.transfer.list found after unzipping target ROM — unrecognized ROM package format. Run 'unzip -l miui_dandelion.zip' to inspect its contents."
-    fi
+      if [ ! -f payload.bin ] && [ ! -d images ] && ! ls *.transfer.list &> /dev/null; then
+        unzip -o -q miui_dandelion.zip || error "Failed to unzip target ROM"
+      fi
 
-    [ -f extracted/partitions/vendor.img ] || error "vendor.img missing from target partitions/ after extraction — extraction incomplete"
+      if [ -f payload.bin ]; then
+        # A/B (seamless-update) ROM: partitions are packed inside payload.bin
+        log "Target ROM format: payload.bin (A/B)"
+        "$PYTHON" "$WORK_DIR/tools/payload_dumper/payload_dumper.py" payload.bin --out extracted/partitions/ 2>&1 | tee -a "$LOG_FILE"
+        [ "${PIPESTATUS[0]}" -eq 0 ] || error "payload_dumper failed on target payload.bin — check $LOG_FILE"
+      elif [ -d images ] && ls images/*.img &> /dev/null; then
+        # Legacy fastboot ROM: partitions ship as separate raw .img files under images/
+        # (common for older non-A/B devices like dandelion, which has no seamless updates)
+        log "Target ROM format: fastboot images/ (non-A/B)"
+        cp images/*.img extracted/partitions/ || error "Failed to copy target images/*.img"
+      elif ls *.transfer.list &> /dev/null; then
+        # Block-based OTA (recovery-flashable) ROM: each partition ships as
+        # <part>.new.dat[.br] + <part>.transfer.list (+ empty <part>.patch.dat
+        # for incremental-only updates, which is irrelevant for a full ROM).
+        # Needs brotli decompression then sdat2img to produce a raw .img.
+        log "Target ROM format: block-based OTA (transfer.list/sdat)"
+        for tl in *.transfer.list; do
+          part="${tl%.transfer.list}"
+          datbr="${part}.new.dat.br"
+          dat="${part}.new.dat"
+
+          if [ -f "$datbr" ]; then
+            log "Decompressing ${datbr}..."
+            brotli -d -f "$datbr" -o "$dat" 2>&1 | tee -a "$LOG_FILE"
+            [ "${PIPESTATUS[0]}" -eq 0 ] || error "brotli decompression failed for $datbr"
+          fi
+
+          if [ -f "$dat" ]; then
+            log "Converting $part via sdat2img..."
+            "$PYTHON" "$WORK_DIR/tools/sdat2img/sdat2img.py" "$tl" "$dat" "extracted/partitions/${part}.img" 2>&1 | tee -a "$LOG_FILE"
+            [ "${PIPESTATUS[0]}" -eq 0 ] || error "sdat2img failed for $part"
+          else
+            log "⚠ No new.dat payload for $part (likely 0 changed blocks) — skipping"
+          fi
+        done
+      else
+        error "No payload.bin, images/*.img, or *.transfer.list found after unzipping target ROM — unrecognized ROM package format. Run 'unzip -l miui_dandelion.zip' to inspect its contents."
+      fi
+
+      [ -f extracted/partitions/vendor.img ] || error "vendor.img missing from target partitions/ after extraction — extraction incomplete"
+    fi
 
     # Also grab target's own boot.img (+ vbmeta/dtbo, kept for reference).
     # These ship as plain loose files in this ROM's zip, no conversion needed.
@@ -331,10 +375,8 @@ extract() {
     cd extracted/partitions/
     for part in product system_ext vendor; do
       if [ -f "${part}.img" ]; then
-        mkdir -p ${part}_mount ${part}
-        sudo mount -o ro,loop ${part}.img ${part}_mount 2>/dev/null || true
-        cp -r ${part}_mount/* $part/ 2>/dev/null || true
-        sudo umount ${part}_mount 2>/dev/null || true
+        extract_partition_image "${part}.img" "${part}" \
+          || error "Failed to extract ${part}.img (target) via EROFS, ext4, and loop-mount — image may be corrupt or an unsupported format"
       fi
     done
     cd "$WORK_DIR/target"
