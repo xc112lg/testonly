@@ -55,6 +55,41 @@ error() {
 # SETUP
 # ============================================================
 
+# Installs Android Image Kitchen if missing or incomplete. Safe to call
+# repeatedly — checks for the actual required scripts (not just the
+# directory), since a prior run that died mid-download/unzip can leave the
+# directory present but empty, which would otherwise cause every future run
+# to wrongly assume AIK is already installed.
+setup_aik() {
+  if [ -f "$HOME/tools/AIK/unpackimg.sh" ] && [ -f "$HOME/tools/AIK/repackimg.sh" ]; then
+    return 0
+  fi
+
+  log "Installing AIK (Android Image Kitchen)..."
+  mkdir -p "$HOME/tools"
+  rm -rf "$HOME/tools/AIK" "$HOME/tools/AIK.zip"
+  cd "$HOME/tools" || return 1
+
+  wget -q https://github.com/osm0sis/Android-Image-Kitchen/archive/refs/heads/master.zip -O AIK.zip || return 1
+  [ -s AIK.zip ] || return 1
+  unzip -q AIK.zip || return 1
+
+  # Don't assume the exact folder name — GitHub archive naming can change
+  local AIK_EXTRACTED_DIR
+  AIK_EXTRACTED_DIR=$(find . -maxdepth 1 -type d -iname "Android-Image-Kitchen-*" | head -n1)
+  [ -n "$AIK_EXTRACTED_DIR" ] || return 1
+
+  mv "$AIK_EXTRACTED_DIR" AIK
+  rm -f AIK.zip
+
+  [ -f AIK/unpackimg.sh ] || return 1
+  [ -f AIK/repackimg.sh ] || return 1
+
+  chmod +x AIK/unpackimg.sh AIK/repackimg.sh
+  log "✓ AIK installed"
+  return 0
+}
+
 setup() {
   log_section "STEP 1: Setting Up Workspace"
   
@@ -127,31 +162,7 @@ setup() {
   command -v brotli &> /dev/null || error "brotli CLI not found — needed to decompress *.new.dat.br files"
 
   # AIK
-  if [ ! -d "$HOME/tools/AIK" ]; then
-    log "Installing AIK (Android Image Kitchen)..."
-    mkdir -p "$HOME/tools"
-    cd "$HOME/tools"
-
-    wget -q https://github.com/osm0sis/Android-Image-Kitchen/archive/refs/heads/master.zip -O AIK.zip \
-      || error "AIK download failed — check network/URL"
-
-    [ -s AIK.zip ] || error "AIK.zip is empty or missing — download did not succeed"
-
-    unzip -q AIK.zip || error "AIK.zip failed to unzip (possibly an HTML error page, not a real zip)"
-
-    # Don't assume the exact folder name — GitHub archive naming can change
-    AIK_EXTRACTED_DIR=$(find . -maxdepth 1 -type d -iname "Android-Image-Kitchen-*" | head -n1)
-    [ -n "$AIK_EXTRACTED_DIR" ] || error "Could not find extracted Android-Image-Kitchen-* directory"
-
-    mv "$AIK_EXTRACTED_DIR" AIK
-    rm -f AIK.zip
-
-    [ -f AIK/unpackimg.sh ] || error "AIK/unpackimg.sh missing after extraction — repo layout may have changed"
-    [ -f AIK/repackimg.sh ] || error "AIK/repackimg.sh missing after extraction — repo layout may have changed"
-
-    chmod +x AIK/unpackimg.sh AIK/repackimg.sh
-    log "✓ AIK installed"
-  fi
+  setup_aik || error "Failed to install AIK — check $LOG_FILE"
   
   log "✓ Setup complete"
 }
@@ -567,6 +578,11 @@ patch_boot() {
   cd "$WORK_DIR/boot_patch"
   
   [ -f "$WORK_DIR/target/extracted/partitions/boot.img" ] || error "Target boot.img not found — did extract() run successfully?"
+
+  if [ ! -f "$HOME/tools/AIK/unpackimg.sh" ] || [ ! -f "$HOME/tools/AIK/repackimg.sh" ]; then
+    log "AIK missing or incomplete — reinstalling..."
+    ( setup_aik ) || error "Failed to install AIK — check $LOG_FILE"
+  fi
 
   log "Unpacking boot image..."
   ~/tools/AIK/unpackimg.sh "$WORK_DIR/target/extracted/partitions/boot.img" 2>&1 | tee -a "$LOG_FILE"
