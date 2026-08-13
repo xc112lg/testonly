@@ -66,24 +66,46 @@ setup_aik() {
   fi
 
   log "Installing AIK (Android Image Kitchen)..."
+
+  command -v wget &> /dev/null || { log "AIK install failed: 'wget' not found on PATH"; return 1; }
+  command -v unzip &> /dev/null || { log "AIK install failed: 'unzip' not found on PATH"; return 1; }
+
   mkdir -p "$HOME/tools"
   rm -rf "$HOME/tools/AIK" "$HOME/tools/AIK.zip"
-  cd "$HOME/tools" || return 1
+  cd "$HOME/tools" || { log "AIK install failed: could not cd into $HOME/tools"; return 1; }
 
-  wget -q https://github.com/osm0sis/Android-Image-Kitchen/archive/refs/heads/master.zip -O AIK.zip || return 1
-  [ -s AIK.zip ] || return 1
-  unzip -q AIK.zip || return 1
+  wget -q https://github.com/osm0sis/Android-Image-Kitchen/archive/refs/heads/master.zip -O AIK.zip 2>>"$LOG_FILE"
+  if [ $? -ne 0 ]; then
+    log "AIK install failed: wget download failed (see $LOG_FILE for details)"
+    return 1
+  fi
+
+  if [ ! -s AIK.zip ]; then
+    log "AIK install failed: downloaded AIK.zip is empty"
+    return 1
+  fi
+
+  unzip -q AIK.zip 2>>"$LOG_FILE"
+  if [ $? -ne 0 ]; then
+    log "AIK install failed: unzip of AIK.zip failed (possibly an HTML error page, not a real zip — see $LOG_FILE)"
+    return 1
+  fi
 
   # Don't assume the exact folder name — GitHub archive naming can change
   local AIK_EXTRACTED_DIR
   AIK_EXTRACTED_DIR=$(find . -maxdepth 1 -type d -iname "Android-Image-Kitchen-*" | head -n1)
-  [ -n "$AIK_EXTRACTED_DIR" ] || return 1
+  if [ -z "$AIK_EXTRACTED_DIR" ]; then
+    log "AIK install failed: no Android-Image-Kitchen-* directory found after unzip"
+    return 1
+  fi
 
   mv "$AIK_EXTRACTED_DIR" AIK
   rm -f AIK.zip
 
-  [ -f AIK/unpackimg.sh ] || return 1
-  [ -f AIK/repackimg.sh ] || return 1
+  if [ ! -f AIK/unpackimg.sh ] || [ ! -f AIK/repackimg.sh ]; then
+    log "AIK install failed: unpackimg.sh/repackimg.sh missing after extraction — repo layout may have changed"
+    return 1
+  fi
 
   chmod +x AIK/unpackimg.sh AIK/repackimg.sh
   log "✓ AIK installed"
@@ -108,7 +130,7 @@ setup() {
   # and loop-mounting are used instead — so it's dropped rather than guessed at).
   sudo apt install -y -qq python3 python3-pip openjdk-11-jdk \
     android-tools-adb android-tools-fastboot \
-    p7zip-full xz-utils brotli e2fsprogs erofs-utils git 2>&1 | tee -a "$LOG_FILE"
+    p7zip-full unzip wget xz-utils brotli e2fsprogs erofs-utils git 2>&1 | tee -a "$LOG_FILE"
   if [ "${PIPESTATUS[0]}" -ne 0 ]; then
     error "apt install failed — check $LOG_FILE for the missing/broken package"
   fi
