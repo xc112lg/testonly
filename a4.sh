@@ -645,13 +645,34 @@ patch_boot() {
   esac
 
   (cd ramdisk_extracted && cpio -idm < ../ramdisk.cpio) || error "Failed to extract ramdisk.cpio — corrupt or unexpected format"
-  [ -f ramdisk_extracted/init.rc ] || error "init.rc not found in extracted ramdisk — cannot patch"
 
-  log "Patching ramdisk (disable AVB, permissive SELinux)..."
-  sed -i 's/verity_user_mode=enforcing/verity_user_mode=disabled/g' ramdisk_extracted/init.rc
-  sed -i 's/ro.boot.veritymode=enforcing/ro.boot.veritymode=disabled/g' ramdisk_extracted/init.rc
-  sed -i 's/SELINUX=enforcing/SELINUX=permissive/g' ramdisk_extracted/init.rc
-  sed -i 's/androidboot.selinux=enforcing/androidboot.selinux=permissive/g' ramdisk_extracted/init.rc
+  # NOTE: on Android 10+ "two-stage init" devices (which includes most
+  # devices launched on Android 10/11, like this target), the boot ramdisk
+  # legitimately contains only a minimal first-stage init binary and no
+  # init.rc — the real init.rc with SELinux/verity settings lives inside
+  # the *system* partition instead (/system/etc/init/hw/init.rc), which
+  # this script doesn't touch. So a missing init.rc here is expected, not
+  # an error — search recursively for any init*.rc that IS present and
+  # patch it, but don't abort the whole run if none exists at this layer;
+  # the --cmdline androidboot.selinux patch below still applies regardless.
+  INIT_RC_FILES=()
+  while IFS= read -r -d '' f; do
+    INIT_RC_FILES+=("$f")
+  done < <(find ramdisk_extracted -maxdepth 3 -iname "init*.rc" -print0 2>/dev/null)
+
+  if [ "${#INIT_RC_FILES[@]}" -eq 0 ]; then
+    log "⚠ No init*.rc found in boot ramdisk (expected on two-stage init devices — Android 10+)."
+    log "  SELinux/verity settings for this device likely live in the system partition instead."
+    log "  Continuing with kernel cmdline patch only; consider 'fastboot --disable-verity --disable-verification flash boot ...' at flash time if boot fails."
+  else
+    log "Patching ramdisk (disable AVB, permissive SELinux) in: ${INIT_RC_FILES[*]}"
+    for rc in "${INIT_RC_FILES[@]}"; do
+      sed -i 's/verity_user_mode=enforcing/verity_user_mode=disabled/g' "$rc"
+      sed -i 's/ro.boot.veritymode=enforcing/ro.boot.veritymode=disabled/g' "$rc"
+      sed -i 's/SELINUX=enforcing/SELINUX=permissive/g' "$rc"
+      sed -i 's/androidboot.selinux=enforcing/androidboot.selinux=permissive/g' "$rc"
+    done
+  fi
 
   log "Repacking ramdisk..."
   (cd ramdisk_extracted && find . -print0 | cpio --null -ov -H newc 2>>"$LOG_FILE") | gzip -9 > ramdisk_new.cpio.gz
@@ -704,11 +725,16 @@ complete() {
   echo ""
   echo "2. Run flash script:"
   echo "   adb reboot bootloader"
-  echo "   fastboot flash boot $WORK_DIR/final_images/boot.img"
+  echo "   fastboot --disable-verity --disable-verification flash boot $WORK_DIR/final_images/boot.img"
   echo "   fastboot flash product $WORK_DIR/final_images/product.img"
   echo "   fastboot flash system_ext $WORK_DIR/final_images/system_ext.img"
   echo "   fastboot flash vendor $WORK_DIR/final_images/vendor.img"
   echo "   fastboot reboot"
+  echo ""
+  echo "   NOTE: --disable-verity/--disable-verification are included because"
+  echo "   this device may use two-stage init, where the boot ramdisk itself"
+  echo "   has no init.rc to patch (see PATCH BOOT step log). These fastboot"
+  echo "   flags handle verity/verification at the bootloader level instead."
   echo ""
   echo "3. Wait 5-10 minutes for first boot"
   echo ""
