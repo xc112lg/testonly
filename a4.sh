@@ -233,17 +233,33 @@ extract_partition_image() {
   rm -rf "$outdir"
   mkdir -p "$outdir"
 
+  # NOTE: Android system partitions often contain files (e.g.
+  # fs_config_dirs/fs_config_files) with very restrictive mode bits —
+  # sometimes 000. If preserved as-is, a later cp -r into these files (e.g.
+  # during merge()) fails with "Permission denied" even though we own them.
+  # Normalizing to u+rwX right after extraction means every downstream step
+  # in this script can freely read/overwrite/rebuild from these files. This
+  # only affects our working copy — it doesn't change what ships in the
+  # final .img, since mkfs.ext4 -d just uses whatever's on disk at build time.
+  normalize_perms() { chmod -R u+rwX "$outdir" 2>/dev/null || true; }
+
   # Try EROFS first (fsck.erofs --extract reads the image directly, no mount needed)
   if command -v fsck.erofs &> /dev/null; then
     if fsck.erofs --extract="$outdir" "$img" &>> "$LOG_FILE"; then
-      [ -n "$(ls -A "$outdir" 2>/dev/null)" ] && return 0
+      if [ -n "$(ls -A "$outdir" 2>/dev/null)" ]; then
+        normalize_perms
+        return 0
+      fi
     fi
   fi
 
   # Try ext4 via debugfs (reads the image directly, no mount needed)
   if command -v debugfs &> /dev/null; then
     debugfs -R "rdump / $outdir" "$img" &>> "$LOG_FILE"
-    [ -n "$(ls -A "$outdir" 2>/dev/null)" ] && return 0
+    if [ -n "$(ls -A "$outdir" 2>/dev/null)" ]; then
+      normalize_perms
+      return 0
+    fi
   fi
 
   # Last resort: actual loop mount (needs root + matching kernel fs driver)
@@ -253,7 +269,10 @@ extract_partition_image() {
     cp -r "$mnt"/* "$outdir"/ 2>/dev/null
     sudo umount "$mnt" 2>>"$LOG_FILE"
     rmdir "$mnt" 2>/dev/null
-    [ -n "$(ls -A "$outdir" 2>/dev/null)" ] && return 0
+    if [ -n "$(ls -A "$outdir" 2>/dev/null)" ]; then
+      normalize_perms
+      return 0
+    fi
   fi
 
   return 1
@@ -441,7 +460,18 @@ EOF
   
   # system_ext
   log "Merging system_ext..."
-  cp -r "$WORK_DIR/donor/extracted/partitions/system_ext"/* "$WORK_DIR/output/system_ext/"
+  # NOTE: system images can contain files (e.g. fs_config_dirs/fs_config_files)
+  # with very restrictive mode bits (sometimes 000) that get preserved by cp.
+  # On a re-run, cp can fail with "Permission denied" trying to overwrite an
+  # existing destination file it can't open for writing — even though the
+  # user owns it. rm can still remove such files (unlink only needs write
+  # permission on the *parent* directory), so clear the destination first,
+  # then normalize the copied output to u+rwX so later steps aren't blocked.
+  rm -rf "$WORK_DIR/output/system_ext"
+  mkdir -p "$WORK_DIR/output/system_ext"
+  cp -r "$WORK_DIR/donor/extracted/partitions/system_ext"/* "$WORK_DIR/output/system_ext/" \
+    || error "Failed to copy system_ext into output"
+  chmod -R u+rwX "$WORK_DIR/output/system_ext"
   rm -rf "$WORK_DIR/output/system_ext/etc/selinux/mapping"
   mkdir -p "$WORK_DIR/output/system_ext/usr/keylayout" "$WORK_DIR/output/system_ext/usr/idc"
   cat > "$WORK_DIR/output/system_ext/usr/keylayout/accdet.kl" << 'ACCDET'
@@ -457,7 +487,11 @@ ACCDET
   
   # vendor
   log "Copying vendor (Redmi 10a drivers)..."
-  cp -r "$WORK_DIR/target/extracted/partitions/vendor"/* "$WORK_DIR/output/vendor/"
+  rm -rf "$WORK_DIR/output/vendor"
+  mkdir -p "$WORK_DIR/output/vendor"
+  cp -r "$WORK_DIR/target/extracted/partitions/vendor"/* "$WORK_DIR/output/vendor/" \
+    || error "Failed to copy vendor into output"
+  chmod -R u+rwX "$WORK_DIR/output/vendor"
   rm -rf "$WORK_DIR/output/vendor/etc/selinux/mapping"
   log "✓ vendor copied"
 }
