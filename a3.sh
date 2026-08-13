@@ -504,13 +504,31 @@ repack() {
   log_section "STEP 5: Repacking Images as EXT4"
   
   mkdir -p "$WORK_DIR/final_images"
+
+  # NOTE: mkfs.ext4's `-c` flag is a boolean "check for bad blocks" switch —
+  # it does NOT take a path argument. The image file path is a positional
+  # argument, and when that file doesn't already exist, mkfs.ext4 requires
+  # an explicit size (it can't infer one from -d's directory size on its
+  # own). So we pre-size the image file ourselves before calling mkfs.ext4.
+  build_ext4_image() {
+    local src="$1" out="$2" label="$3"
+    local size_kb size_mb
+    size_kb=$(du -sk "$src" | cut -f1)
+    # 25% headroom for filesystem overhead/metadata + future OTA slack,
+    # minimum 16MB so tiny partitions still get a workable filesystem
+    size_mb=$(( (size_kb * 5 / 4) / 1024 + 16 ))
+    log "Sizing ${label}.img at ${size_mb}MB (source content: $((size_kb / 1024))MB)"
+    rm -f "$out"
+    truncate -s "${size_mb}M" "$out" || error "Failed to allocate $out at ${size_mb}MB"
+    mkfs.ext4 -F -L "$label" -T default -b 4096 -d "$src" "$out" 2>&1 | tee -a "$LOG_FILE"
+    [ "${PIPESTATUS[0]}" -eq 0 ] || error "mkfs.ext4 failed building ${label}.img"
+  }
   
   log "Creating product.img..."
   if [ -f "$WORK_DIR/final_images/product.img" ]; then
     log "✓ product.img already exists — skipping"
   else
-    mkfs.ext4 -L product -T default -d "$WORK_DIR/output/product" -b 4096 -c "$WORK_DIR/final_images/product.img" 2>&1 | tee -a "$LOG_FILE"
-    [ "${PIPESTATUS[0]}" -eq 0 ] || error "mkfs.ext4 failed building product.img"
+    build_ext4_image "$WORK_DIR/output/product" "$WORK_DIR/final_images/product.img" "product"
   fi
   PROD_SIZE=$(du -sh "$WORK_DIR/final_images/product.img" | cut -f1)
   log "✓ product.img ($PROD_SIZE)"
@@ -519,8 +537,7 @@ repack() {
   if [ -f "$WORK_DIR/final_images/system_ext.img" ]; then
     log "✓ system_ext.img already exists — skipping"
   else
-    mkfs.ext4 -L system_ext -T default -d "$WORK_DIR/output/system_ext" -b 4096 -c "$WORK_DIR/final_images/system_ext.img" 2>&1 | tee -a "$LOG_FILE"
-    [ "${PIPESTATUS[0]}" -eq 0 ] || error "mkfs.ext4 failed building system_ext.img"
+    build_ext4_image "$WORK_DIR/output/system_ext" "$WORK_DIR/final_images/system_ext.img" "system_ext"
   fi
   SEXT_SIZE=$(du -sh "$WORK_DIR/final_images/system_ext.img" | cut -f1)
   log "✓ system_ext.img ($SEXT_SIZE)"
@@ -529,8 +546,7 @@ repack() {
   if [ -f "$WORK_DIR/final_images/vendor.img" ]; then
     log "✓ vendor.img already exists — skipping"
   else
-    mkfs.ext4 -L vendor -T default -d "$WORK_DIR/output/vendor" -b 4096 -c "$WORK_DIR/final_images/vendor.img" 2>&1 | tee -a "$LOG_FILE"
-    [ "${PIPESTATUS[0]}" -eq 0 ] || error "mkfs.ext4 failed building vendor.img"
+    build_ext4_image "$WORK_DIR/output/vendor" "$WORK_DIR/final_images/vendor.img" "vendor"
   fi
   VEND_SIZE=$(du -sh "$WORK_DIR/final_images/vendor.img" | cut -f1)
   log "✓ vendor.img ($VEND_SIZE)"
