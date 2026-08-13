@@ -604,36 +604,76 @@ patch_boot() {
   
   [ -f "$WORK_DIR/target/extracted/partitions/boot.img" ] || error "Target boot.img not found — did extract() run successfully?"
 
-  if [ ! -f "$HOME/tools/AIK/unpackimg.sh" ] || [ ! -f "$HOME/tools/AIK/repackimg.sh" ]; then
-    log "AIK missing or incomplete — reinstalling..."
-    ( setup_aik ) || error "Failed to install AIK — check $LOG_FILE"
+  local MKBOOTIMG_DIR="$WORK_DIR/tools/mkbootimg"
+  if [ ! -f "$MKBOOTIMG_DIR/unpack_bootimg.py" ] || [ ! -f "$MKBOOTIMG_DIR/mkbootimg.py" ]; then
+    log "mkbootimg tools missing — installing..."
+    rm -rf "$MKBOOTIMG_DIR"
+    git clone -q https://github.com/jbeich/platform_system_tools_mkbootimg.git "$MKBOOTIMG_DIR" 2>&1 | tee -a "$LOG_FILE"
+    [ "${PIPESTATUS[0]}" -eq 0 ] || error "Failed to clone mkbootimg tools"
+    [ -f "$MKBOOTIMG_DIR/unpack_bootimg.py" ] || error "unpack_bootimg.py missing after clone"
+    [ -f "$MKBOOTIMG_DIR/mkbootimg.py" ] || error "mkbootimg.py missing after clone"
   fi
 
   log "Unpacking boot image..."
-  ~/tools/AIK/unpackimg.sh "$WORK_DIR/target/extracted/partitions/boot.img" 2>&1 | tee -a "$LOG_FILE"
-  [ "${PIPESTATUS[0]}" -eq 0 ] || error "AIK unpackimg.sh failed on boot.img"
-  [ -f split_img/ramdisk.cpio.gz ] || error "ramdisk.cpio.gz missing after unpack — boot.img may be a different format (e.g. no separate ramdisk, or vendor_boot split)"
+  rm -rf unpacked
+  "$PYTHON" "$MKBOOTIMG_DIR/unpack_bootimg.py" --boot_img "$WORK_DIR/target/extracted/partitions/boot.img" \
+    --out unpacked --format=mkbootimg -0 > mkbootimg_args.raw 2>>"$LOG_FILE"
+  [ "${PIPESTATUS[0]}" -eq 0 ] || error "unpack_bootimg.py failed on boot.img — check $LOG_FILE"
+  [ -f unpacked/ramdisk ] || error "ramdisk missing from unpack output — boot.img may be a different format (e.g. vendor_boot split)"
+  [ -s mkbootimg_args.raw ] || error "unpack_bootimg.py produced no mkbootimg arguments"
+
+  # Read the null-separated arg list into a bash array, preserving any
+  # embedded spaces in individual argument values (e.g. board name, cmdline)
+  MKBOOTIMG_ARGS=()
+  while IFS= read -r -d '' arg; do
+    MKBOOTIMG_ARGS+=("$arg")
+  done < mkbootimg_args.raw
 
   log "Extracting ramdisk..."
-  cd split_img
-  cpio -idm < ramdisk.cpio.gz || error "Failed to extract ramdisk.cpio.gz — corrupt or unexpected compression"
-  [ -f init.rc ] || error "init.rc not found in extracted ramdisk — cannot patch"
+  rm -rf ramdisk_extracted
+  mkdir -p ramdisk_extracted
+
+  # Android ramdisks are usually gzip-compressed cpio archives; detect and
+  # decompress accordingly rather than assuming a fixed format.
+  RAMDISK_TYPE=$(file -b unpacked/ramdisk)
+  case "$RAMDISK_TYPE" in
+    *gzip*) zcat unpacked/ramdisk > ramdisk.cpio || error "Failed to gunzip ramdisk" ;;
+    *LZ4*|*lz4*) command -v lz4 &> /dev/null && lz4 -d unpacked/ramdisk ramdisk.cpio \
+        || error "Ramdisk is LZ4-compressed but 'lz4' CLI is not available — install it or handle manually" ;;
+    *cpio*|*ASCII\ cpio*) cp unpacked/ramdisk ramdisk.cpio ;;
+    *) error "Unrecognized ramdisk compression format: $RAMDISK_TYPE" ;;
+  esac
+
+  (cd ramdisk_extracted && cpio -idm < ../ramdisk.cpio) || error "Failed to extract ramdisk.cpio — corrupt or unexpected format"
+  [ -f ramdisk_extracted/init.rc ] || error "init.rc not found in extracted ramdisk — cannot patch"
 
   log "Patching ramdisk (disable AVB, permissive SELinux)..."
-  sed -i 's/verity_user_mode=enforcing/verity_user_mode=disabled/g' init.rc
-  sed -i 's/ro.boot.veritymode=enforcing/ro.boot.veritymode=disabled/g' init.rc
-  sed -i 's/SELINUX=enforcing/SELINUX=permissive/g' init.rc
-  sed -i 's/androidboot.selinux=enforcing/androidboot.selinux=permissive/g' init.rc
-  
+  sed -i 's/verity_user_mode=enforcing/verity_user_mode=disabled/g' ramdisk_extracted/init.rc
+  sed -i 's/ro.boot.veritymode=enforcing/ro.boot.veritymode=disabled/g' ramdisk_extracted/init.rc
+  sed -i 's/SELINUX=enforcing/SELINUX=permissive/g' ramdisk_extracted/init.rc
+  sed -i 's/androidboot.selinux=enforcing/androidboot.selinux=permissive/g' ramdisk_extracted/init.rc
+
   log "Repacking ramdisk..."
-  cd ..
-  find split_img -print0 2>/dev/null | cpio --null -ov -H newc 2>/dev/null | gzip -9 > ramdisk.cpio.gz
-  rm -f split_img/ramdisk.cpio.gz
-  
+  (cd ramdisk_extracted && find . -print0 | cpio --null -ov -H newc 2>>"$LOG_FILE") | gzip -9 > ramdisk_new.cpio.gz
+  [ -s ramdisk_new.cpio.gz ] || error "Repacked ramdisk is empty — cpio/gzip step failed"
+
+  # Swap the --ramdisk value in the preserved arg list to point at our
+  # patched ramdisk, and also permissive-ize androidboot.selinux if it's
+  # baked into the kernel cmdline (not just init.rc).
+  for i in "${!MKBOOTIMG_ARGS[@]}"; do
+    if [ "${MKBOOTIMG_ARGS[$i]}" = "--ramdisk" ]; then
+      MKBOOTIMG_ARGS[$((i+1))]="$WORK_DIR/boot_patch/ramdisk_new.cpio.gz"
+    fi
+    if [ "${MKBOOTIMG_ARGS[$i]}" = "--cmdline" ]; then
+      MKBOOTIMG_ARGS[$((i+1))]="${MKBOOTIMG_ARGS[$((i+1))]//androidboot.selinux=enforcing/androidboot.selinux=permissive}"
+    fi
+  done
+
   log "Rebuilding boot.img..."
-  ./repackimg.sh 2>&1 | tee -a "$LOG_FILE"
-  [ "${PIPESTATUS[0]}" -eq 0 ] || error "AIK repackimg.sh failed"
-  [ -f image-new.img ] || error "repackimg.sh did not produce image-new.img"
+  rm -f image-new.img
+  "$PYTHON" "$MKBOOTIMG_DIR/mkbootimg.py" "${MKBOOTIMG_ARGS[@]}" --output image-new.img 2>&1 | tee -a "$LOG_FILE"
+  [ "${PIPESTATUS[0]}" -eq 0 ] || error "mkbootimg.py failed to rebuild boot.img — check $LOG_FILE"
+  [ -s image-new.img ] || error "mkbootimg.py did not produce a valid image-new.img"
   
   cp image-new.img "$WORK_DIR/final_images/boot.img"
   BOOT_SIZE=$(du -sh "$WORK_DIR/final_images/boot.img" | cut -f1)
