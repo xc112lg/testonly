@@ -74,7 +74,10 @@ setup_aik() {
   rm -rf "$HOME/tools/AIK" "$HOME/tools/AIK.zip"
   cd "$HOME/tools" || { log "AIK install failed: could not cd into $HOME/tools"; return 1; }
 
-  wget -q https://github.com/osm0sis/Android-Image-Kitchen/archive/refs/heads/master.zip -O AIK.zip 2>>"$LOG_FILE"
+  # NOTE: osm0sis/Android-Image-Kitchen restructured their repo — the
+  # `master` branch now contains only Windows .bat scripts. The Linux
+  # unpackimg.sh/repackimg.sh live on the separate `AIK-Linux` branch.
+  wget -q https://github.com/osm0sis/Android-Image-Kitchen/archive/refs/heads/AIK-Linux.zip -O AIK.zip 2>>"$LOG_FILE"
   if [ $? -ne 0 ]; then
     log "AIK install failed: wget download failed (see $LOG_FILE for details)"
     return 1
