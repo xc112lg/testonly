@@ -442,7 +442,7 @@ EOF
   # system_ext
   log "Merging system_ext..."
   cp -r "$WORK_DIR/donor/extracted/partitions/system_ext"/* "$WORK_DIR/output/system_ext/"
-  rm -f "$WORK_DIR/output/system_ext/etc/selinux/mapping"
+  rm -rf "$WORK_DIR/output/system_ext/etc/selinux/mapping"
   mkdir -p "$WORK_DIR/output/system_ext/usr/keylayout" "$WORK_DIR/output/system_ext/usr/idc"
   cat > "$WORK_DIR/output/system_ext/usr/keylayout/accdet.kl" << 'ACCDET'
 key 226   HEADSETHOOK
@@ -458,7 +458,7 @@ ACCDET
   # vendor
   log "Copying vendor (Redmi 10a drivers)..."
   cp -r "$WORK_DIR/target/extracted/partitions/vendor"/* "$WORK_DIR/output/vendor/"
-  rm -f "$WORK_DIR/output/vendor/etc/selinux/mapping"
+  rm -rf "$WORK_DIR/output/vendor/etc/selinux/mapping"
   log "✓ vendor copied"
 }
 
