@@ -24,6 +24,19 @@ PYTHON="$PY_VENV/bin/python"
 DONOR_URL="https://bkt-sgp-miui-ota-update-alisgp.oss-ap-southeast-1.aliyuncs.com/OS2.0.215.0.VLHCNXM/pearl-ota_full-OS2.0.215.0.VLHCNXM-user-15.0-8246bfc336.zip"
 TARGET_URL="https://bkt-sgp-miui-ota-update-alisgp.oss-ap-southeast-1.aliyuncs.com/V12.5.16.0.RCZMIXM/miui_DANDELIONC3L2Global_V12.5.16.0.RCZMIXM_e004d17bcd_11.0.zip"
 
+# ------------------------------------------------------------
+# Pixeldrain upload (optional) — fill in your OWN key below.
+#
+# SECURITY NOTE: whatever key you put here is now baked into this file.
+# Do NOT commit this script to a public repo, paste it into chat, or share
+# it anywhere with the key filled in. If you ever do, rotate the key
+# immediately at https://pixeldrain.com/user/api_keys — treat it as
+# compromised the moment it leaves your machine.
+#
+# Leave this blank to skip the upload step entirely (it's optional).
+# ------------------------------------------------------------
+export PIXELDRAIN_API_KEY="aaf6abe7-1625-4b74-ab51-3924ecc4ba88"
+
 # Colors
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -133,7 +146,7 @@ setup() {
   # and loop-mounting are used instead — so it's dropped rather than guessed at).
   sudo apt install -y -qq python3 python3-pip openjdk-11-jdk \
     android-tools-adb android-tools-fastboot \
-    p7zip-full unzip wget xz-utils brotli e2fsprogs erofs-utils git 2>&1 | tee -a "$LOG_FILE"
+    p7zip-full unzip zip wget xz-utils brotli e2fsprogs erofs-utils git 2>&1 | tee -a "$LOG_FILE"
   if [ "${PIPESTATUS[0]}" -ne 0 ]; then
     error "apt install failed — check $LOG_FILE for the missing/broken package"
   fi
@@ -702,11 +715,180 @@ patch_boot() {
 }
 
 # ============================================================
+# PACKAGE FLASHABLE ZIP
+# ============================================================
+
+package_flashable_zip() {
+  log_section "STEP 7: Packaging Flashable ZIP"
+
+  local ZIP_DIR="$WORK_DIR/flashable_zip"
+  local ZIP_OUT="$WORK_DIR/final_images/HyperOS2_dandelion_flashable_${TIMESTAMP}.zip"
+
+  if [ -f "$ZIP_OUT" ]; then
+    log "✓ Flashable zip already exists — skipping"
+    return 0
+  fi
+
+  for img in boot product system_ext vendor; do
+    [ -f "$WORK_DIR/final_images/${img}.img" ] || error "Missing ${img}.img — run repack()/patch_boot() first"
+  done
+
+  command -v zip &> /dev/null || { sudo apt install -y -qq zip 2>&1 | tee -a "$LOG_FILE"; }
+  command -v zip &> /dev/null || error "'zip' command not available and could not be installed"
+
+  rm -rf "$ZIP_DIR"
+  mkdir -p "$ZIP_DIR/META-INF/com/google/android" "$ZIP_DIR/images"
+
+  for img in boot product system_ext vendor; do
+    cp "$WORK_DIR/final_images/${img}.img" "$ZIP_DIR/images/"
+  done
+
+  # Placeholder — required to exist by some recoveries' installer validation,
+  # but its contents aren't parsed since update-binary below is a raw shell
+  # script, not the compiled edify interpreter (see comment in that script).
+  cat > "$ZIP_DIR/META-INF/com/google/android/updater-script" << 'EOF'
+# This zip uses a shell-script update-binary; this file's contents are not parsed.
+EOF
+
+  # NOTE: update-binary here is a plain shell script, not the compiled edify
+  # interpreter binary. Recoveries (TWRP, OrangeFox, etc.) invoke this file
+  # by exec'ing it directly — the #!/sbin/sh shebang handles interpretation,
+  # same technique used by Magisk/AnyKernel3 zips. This bypasses edify
+  # entirely, so updater-script above is never actually read.
+  cat > "$ZIP_DIR/META-INF/com/google/android/update-binary" << 'UPDATER_EOF'
+#!/sbin/sh
+# Flashable installer for HyperOS2 -> Redmi 10a (dandelion) port.
+# Writes prebuilt partition images directly to their block devices via dd.
+
+OUTFD="$2"
+ZIPFILE="$3"
+
+ui_print() {
+  echo "ui_print $1" >&$OUTFD
+  echo "ui_print" >&$OUTFD
+}
+
+ui_print "============================================="
+ui_print " HyperOS2 -> Redmi 10a (dandelion) flashable  "
+ui_print "============================================="
+
+TMPDIR=/tmp/hyperos2_flash
+rm -rf "$TMPDIR"
+mkdir -p "$TMPDIR"
+cd "$TMPDIR" || exit 1
+
+ui_print "- Extracting images from zip..."
+unzip -o "$ZIPFILE" "images/*" -d "$TMPDIR" >/dev/null 2>&1
+
+# Tries common by-name symlink locations, and both non-A/B and _a/_b suffixed
+# names, since this varies by device/kernel and this script can't know in
+# advance which layout this specific unit uses.
+find_partition() {
+  local name="$1"
+  local base cand
+  for base in /dev/block/bootdevice/by-name /dev/block/by-name /dev/block/platform/*/by-name /dev/block/platform/*/*/by-name; do
+    for cand in "$base/$name" "$base/${name}_a" "$base/${name}_b"; do
+      [ -e "$cand" ] && { echo "$cand"; return 0; }
+    done
+  done
+  return 1
+}
+
+flash_image() {
+  local part="$1"
+  local img="$TMPDIR/images/${part}.img"
+  [ -f "$img" ] || { ui_print "! Missing ${part}.img in zip, skipping"; return 1; }
+
+  local dev
+  dev=$(find_partition "$part")
+  if [ -z "$dev" ]; then
+    ui_print "! Could not locate partition '$part' via by-name symlinks — ABORTING this partition"
+    return 1
+  fi
+
+  ui_print "- Flashing $part -> $dev"
+  dd if="$img" of="$dev" bs=4M 2>&1
+}
+
+FAILED=0
+for part in boot product system_ext vendor; do
+  flash_image "$part" || FAILED=1
+done
+
+rm -rf "$TMPDIR"
+
+if [ "$FAILED" -eq 1 ]; then
+  ui_print "! One or more partitions failed to flash — check recovery log before rebooting"
+  exit 1
+fi
+
+ui_print "- All partitions flashed successfully."
+ui_print "- Reboot when ready."
+exit 0
+UPDATER_EOF
+  chmod 755 "$ZIP_DIR/META-INF/com/google/android/update-binary"
+
+  cd "$ZIP_DIR" || error "Failed to cd into $ZIP_DIR"
+  zip -r -X "$ZIP_OUT" META-INF images 2>&1 | tee -a "$LOG_FILE"
+  [ "${PIPESTATUS[0]}" -eq 0 ] || error "Failed to create flashable zip"
+  [ -s "$ZIP_OUT" ] || error "Flashable zip was created but is empty"
+
+  ZIP_SIZE=$(du -sh "$ZIP_OUT" | cut -f1)
+  log "✓ Flashable ZIP created: $ZIP_OUT ($ZIP_SIZE)"
+
+  upload_to_pixeldrain "$ZIP_OUT"
+}
+
+# ============================================================
+# UPLOAD TO PIXELDRAIN (optional)
+# ============================================================
+
+# Uploads the given file to Pixeldrain if PIXELDRAIN_API_KEY is set in the
+# environment. This is entirely optional — if the variable isn't set, this
+# step is skipped silently rather than failing the whole run. The key is
+# NEVER hardcoded here or written to the log file; it's only ever read from
+# the environment at call time and passed straight to curl.
+upload_to_pixeldrain() {
+  local file="$1"
+
+  if [ -z "${PIXELDRAIN_API_KEY:-}" ]; then
+    log "PIXELDRAIN_API_KEY not set — skipping upload (export it before running this script to enable)"
+    return 0
+  fi
+
+  command -v curl &> /dev/null || { log "curl not found — skipping Pixeldrain upload"; return 0; }
+  [ -f "$file" ] || { log "File not found for upload: $file"; return 1; }
+
+  log "Uploading $(basename "$file") to Pixeldrain..."
+
+  local filename response http_code body id
+  filename=$(basename "$file")
+  response=$(curl -s -w "\n%{http_code}" -X PUT -T "$file" \
+    -u ":${PIXELDRAIN_API_KEY}" \
+    "https://pixeldrain.com/api/file/${filename}")
+  http_code=$(echo "$response" | tail -n1)
+  body=$(echo "$response" | sed '$d')
+
+  if [ "$http_code" -ge 400 ] 2>/dev/null; then
+    log "⚠ Pixeldrain upload failed (HTTP $http_code): $body"
+    return 1
+  fi
+
+  id=$(echo "$body" | grep -o '"id"[[:space:]]*:[[:space:]]*"[^"]*"' | sed -E 's/.*"id"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/')
+  if [ -z "$id" ]; then
+    log "⚠ Pixeldrain upload response did not contain a file id: $body"
+    return 1
+  fi
+
+  log "✓ Uploaded to Pixeldrain: https://pixeldrain.com/u/${id}"
+}
+
+# ============================================================
 # COMPLETION
 # ============================================================
 
 complete() {
-  log_section "STEP 7: Complete!"
+  log_section "STEP 8: Complete!"
   
   echo ""
   echo "╔════════════════════════════════════════╗"
@@ -735,6 +917,11 @@ complete() {
   echo "   this device may use two-stage init, where the boot ramdisk itself"
   echo "   has no init.rc to patch (see PATCH BOOT step log). These fastboot"
   echo "   flags handle verity/verification at the bootloader level instead."
+  echo ""
+  echo "   ALTERNATIVE: a flashable zip was also built in final_images/ —"
+  echo "   flash it from TWRP/recovery instead if you'd rather not use fastboot."
+  echo "   Note it dd's directly to by-name partitions and does not pass the"
+  echo "   verity/verification disable flags fastboot does above."
   echo ""
   echo "3. Wait 5-10 minutes for first boot"
   echo ""
@@ -769,6 +956,7 @@ main() {
   merge
   repack
   patch_boot
+  package_flashable_zip
   complete
   
   END=$(date +%s)
