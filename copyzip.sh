@@ -9,7 +9,6 @@ else
     echo "⚠ .env file not found"
 fi
 
-if ls out/target/product/*/*.zip >/dev/null 2>&1; then
 
 rm -rf testonly
 git clone https://$GH_TOKEN@github.com/xc112lg/testonly
@@ -30,6 +29,3 @@ cp final_images/*.zip testonly/
 cd testonly
 chmod +x multi_upload3.sh
 ./multi_upload3.sh > /dev/null
-else
-    exit 1
-fi
