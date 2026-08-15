@@ -35,7 +35,7 @@ TARGET_URL="https://bkt-sgp-miui-ota-update-alisgp.oss-ap-southeast-1.aliyuncs.c
 #
 # Leave this blank to skip the upload step entirely (it's optional).
 # ------------------------------------------------------------
-export PIXELDRAIN_API_KEY=""
+export PIXELDRAIN_API_KEY="aaf6abe7-1625-4b74-ab51-3924ecc4ba88"
 
 # Colors
 GREEN='\033[0;32m'
