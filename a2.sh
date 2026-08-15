@@ -920,7 +920,7 @@ UPDATER_EOF
   ZIP_SIZE=$(du -sh "$ZIP_OUT" | cut -f1)
   log "✓ Flashable ZIP created: $ZIP_OUT ($ZIP_SIZE)"
 
-  upload_to_pixeldrain "$ZIP_OUT"
+  #upload_to_pixeldrain "$ZIP_OUT"
 }
 
 # ============================================================
