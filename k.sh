@@ -25,7 +25,7 @@ setup_git_auth() {
 }
 setup_git_auth
 
-if ls out/target/product/*/*.zip >/dev/null 2>&1; then
+if ls newkernel/*.zip >/dev/null 2>&1; then
 
 rm -rf testonly
 git clone https://github.com/xc112lg/testonly
