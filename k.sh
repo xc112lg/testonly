@@ -35,15 +35,15 @@ git clone https://github.com/xc112lg/testonly
 #cp out/target/product/*/recovery.img blossom_lunaris
 rm out/target/product/*/*-ota.zip
 cp newkernel/*.zip testonly/
-for img in out/target/product/*/recovery.img; do
-    device=$(basename "$(dirname "$img")")
-    cp "$img" "testonly/${device}_recovery.img"
-done
+# for img in out/target/product/*/recovery.img; do
+#     device=$(basename "$(dirname "$img")")
+#     cp "$img" "testonly/${device}_recovery.img"
+# done
 
-for img in out/target/product/*/boot.img; do
-    device=$(basename "$(dirname "$img")")
-    cp "$img" "testonly/${device}_boot.img"
-done
+# for img in out/target/product/*/boot.img; do
+#     device=$(basename "$(dirname "$img")")
+#     cp "$img" "testonly/${device}_boot.img"
+# done
 # echo "test" > blossom_lunaris/dummy.txt
 
 # Create the zip
